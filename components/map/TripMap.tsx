@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import type { GeoJSONSource, Marker, Map as MaplibreMap } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
 const MAPTILER_KEY = process.env.NEXT_PUBLIC_MAPTILER_KEY!;
@@ -124,8 +125,8 @@ export function ElevationProfile() {
 
 export function TripMap() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const mapRef       = useRef<import('maplibre-gl').Map | null>(null);
-  const markersRef   = useRef<import('maplibre-gl').Marker[]>([]);
+  const mapRef       = useRef<MaplibreMap | null>(null);
+  const markersRef   = useRef<Marker[]>([]);
   const rafRef       = useRef<number | null>(null);
   const styleKeyRef  = useRef<keyof typeof STYLE_URLS>('terrain');
   const [styleKey, setStyleKey] = useState<keyof typeof STYLE_URLS>('terrain');
@@ -196,14 +197,14 @@ export function TripMap() {
             ROUTE_COORDS[lo][0] + (ROUTE_COORDS[hi][0] - ROUTE_COORDS[lo][0]) * f,
             ROUTE_COORDS[lo][1] + (ROUTE_COORDS[hi][1] - ROUTE_COORDS[lo][1]) * f,
           ];
-          (map.getSource('route') as mgl.GeoJSONSource)?.setData({
+          (map.getSource('route') as GeoJSONSource)?.setData({
             type: 'Feature', properties: {},
             geometry: { type: 'LineString', coordinates: [...ROUTE_COORDS.slice(0, lo + 1), tip] },
           });
           if (step < TOTAL) {
             rafRef.current = requestAnimationFrame(tick);
           } else {
-            (map.getSource('route') as mgl.GeoJSONSource)?.setData({
+            (map.getSource('route') as GeoJSONSource)?.setData({
               type: 'Feature', properties: {},
               geometry: { type: 'LineString', coordinates: ROUTE_COORDS },
             });
