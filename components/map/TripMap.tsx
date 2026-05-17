@@ -214,6 +214,7 @@ export function TripMap() {
       });
       mapRef.current = map;
       map.addControl(new mgl.NavigationControl(), 'top-right');
+      map.addControl(new mgl.FullscreenControl(), 'top-right');
 
       const addLayers = () => {
         // cancel any running draw animation
