@@ -35,39 +35,98 @@ const ROUTE_COORDS: [number, number][] = [
 
 // ─── Elevation profile ────────────────────────────────────────────────────────
 
-const ELEV_DATA = [
-  { pct: 0,   elev: 490,  label: 'Tbilisi' },
-  { pct: 8,   elev: 467,  label: null },
-  { pct: 18,  elev: 1740, label: 'Kazbegi' },
-  { pct: 27,  elev: 2200, label: null },
-  { pct: 36,  elev: 2926, label: 'Abano Pass' },
-  { pct: 44,  elev: 1900, label: 'Tusheti' },
-  { pct: 60,  elev: 500,  label: null },
-  { pct: 72,  elev: 800,  label: 'Sighnaghi' },
-  { pct: 84,  elev: 700,  label: null },
-  { pct: 100, elev: 490,  label: null },
-];
+const NUM_SAMPLES = 60;
 
-const VW = 1000, VH = 170;
-const PAD = { t: 36, r: 14, b: 28, l: 42 };
+function sampleRoute(n: number): [number, number][] {
+  const pts: [number, number][] = [];
+  const segs = ROUTE_COORDS.length - 1;
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    const raw = t * segs;
+    const lo = Math.min(Math.floor(raw), segs - 1);
+    const hi = Math.min(lo + 1, segs);
+    const f = raw - lo;
+    pts.push([
+      ROUTE_COORDS[lo][0] + (ROUTE_COORDS[hi][0] - ROUTE_COORDS[lo][0]) * f,
+      ROUTE_COORDS[lo][1] + (ROUTE_COORDS[hi][1] - ROUTE_COORDS[lo][1]) * f,
+    ]);
+  }
+  return pts;
+}
+
+const SAMPLED = sampleRoute(NUM_SAMPLES);
+
+// Which sample index is nearest to each named stop (skip return Tbilisi)
+const LABELED_NAMES = new Set(['Tbilisi', 'Kazbegi', 'Tusheti (Omalo)', 'Sighnaghi']);
+const STOP_LABELS = STOPS
+  .filter((s, i) => LABELED_NAMES.has(s.name) && i < STOPS.length - 1)
+  .map(stop => {
+    let best = 0, bestD = Infinity;
+    SAMPLED.forEach(([lon, lat], i) => {
+      const d = Math.hypot(lon - stop.coords[0], lat - stop.coords[1]);
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    return { idx: best, name: stop.name === 'Tusheti (Omalo)' ? 'Tusheti' : stop.name };
+  })
+  .filter((l, i, arr) => arr.findIndex(x => x.idx === l.idx) === i); // deduplicate
+
+// Approximate fallback (interpolated from known knots)
+const KNOTS = [
+  { p: 0, e: 490 }, { p: 8, e: 467 }, { p: 18, e: 1740 }, { p: 27, e: 2200 },
+  { p: 36, e: 2926 }, { p: 44, e: 1900 }, { p: 60, e: 500 },
+  { p: 72, e: 800 }, { p: 84, e: 700 }, { p: 100, e: 490 },
+];
+const FALLBACK = SAMPLED.map((_, i) => {
+  const pct = (i / (NUM_SAMPLES - 1)) * 100;
+  const ki = KNOTS.findIndex((k, j) => j < KNOTS.length - 1 && pct >= k.p && pct <= KNOTS[j + 1].p);
+  const lo = KNOTS[ki ?? 0], hi = KNOTS[(ki ?? 0) + 1] ?? KNOTS[KNOTS.length - 1];
+  return Math.round(lo.e + (hi.e - lo.e) * ((pct - lo.p) / (hi.p - lo.p)));
+});
+
+// SVG constants
+const VW = 1000, VH = 175;
+const PAD = { t: 44, r: 14, b: 28, l: 44 };
 const CW = VW - PAD.l - PAD.r;
 const CH = VH - PAD.t - PAD.b;
 const MAX_E = 3200;
-const ex = (pct: number) => PAD.l + (pct / 100) * CW;
-const ey = (elev: number) => PAD.t + CH - (elev / MAX_E) * CH;
-
-const elevPts = ELEV_DATA.map(d => ({ ...d, x: ex(d.pct), y: ey(d.elev) }));
-const linePath = elevPts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
-const areaPath = `${linePath} L${ex(100).toFixed(1)},${(PAD.t + CH).toFixed(1)} L${ex(0).toFixed(1)},${(PAD.t + CH).toFixed(1)} Z`;
+const ex = (i: number) => PAD.l + (i / (NUM_SAMPLES - 1)) * CW;
+const ey = (e: number) => PAD.t + CH - (e / MAX_E) * CH;
 
 export function ElevationProfile() {
+  const [elevations, setElevations] = useState<number[]>(FALLBACK);
+  const [isReal, setIsReal] = useState(false);
+
+  useEffect(() => {
+    const locations = SAMPLED.map(([lon, lat]) => ({ latitude: lat, longitude: lon }));
+    fetch('https://api.open-elevation.com/api/v1/lookup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ locations }),
+    })
+      .then(r => r.json())
+      .then(d => {
+        setElevations(d.results.map((r: { elevation: number }) => Math.max(0, r.elevation)));
+        setIsReal(true);
+      })
+      .catch(() => {}); // silently keep fallback
+  }, []);
+
+  const pts = elevations.map((e, i) => ({ x: ex(i), y: ey(e), e }));
+  const pathD = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+  const areaD = `${pathD} L${ex(NUM_SAMPLES - 1).toFixed(1)},${(PAD.t + CH).toFixed(1)} L${ex(0).toFixed(1)},${(PAD.t + CH).toFixed(1)} Z`;
+  const peakIdx = elevations.reduce((b, e, i) => e > elevations[b] ? i : b, 0);
+  const peakElev = elevations[peakIdx];
+
   return (
     <section className="space-y-2">
-      <div>
-        <h2 className="text-lg font-semibold tracking-tight">Elevation Profile</h2>
-        <p className="text-sm text-slate-500">
-          Abano Pass (2 926 m) is the crux — loose shale, sheer drops, no barriers
-        </p>
+      <div className="flex items-baseline justify-between">
+        <div>
+          <h2 className="text-lg font-semibold tracking-tight">Elevation Profile</h2>
+          <p className="text-sm text-slate-500">
+            Peak at {peakElev.toLocaleString()} m — loose shale, sheer drops, no barriers
+          </p>
+        </div>
+        {!isReal && <span className="text-xs text-slate-400 italic">approximate</span>}
       </div>
       <div className="rounded-xl border border-slate-200 bg-white shadow-sm px-3 pt-2 pb-1">
         <svg viewBox={`0 0 ${VW} ${VH}`} className="w-full" style={{ display: 'block' }}>
@@ -89,32 +148,31 @@ export function ElevationProfile() {
           ))}
 
           {/* area + line */}
-          <path d={areaPath} fill="url(#eGrad)" />
-          <path d={linePath} fill="none" stroke="#f97316" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+          <path d={areaD} fill="url(#eGrad)" />
+          <path d={pathD} fill="none" stroke="#f97316" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
 
-          {/* labeled points */}
-          {elevPts.filter(p => p.label).map(p => {
-            const isPeak = p.label === 'Abano Pass';
-            const anchor = p.pct < 10 ? 'start' : p.pct > 85 ? 'end' : 'middle';
+          {/* peak */}
+          <circle cx={ex(peakIdx)} cy={ey(peakElev)} r="5" fill="#ef4444" stroke="white" strokeWidth="1.5" />
+          <text x={ex(peakIdx)} y={ey(peakElev) - 24} textAnchor="middle" fontSize="11" fontWeight="700" fill="#ef4444" fontFamily="system-ui,sans-serif">
+            Abano Pass
+          </text>
+          <text x={ex(peakIdx)} y={ey(peakElev) - 12} textAnchor="middle" fontSize="10" fill="#ef4444" fontFamily="system-ui,sans-serif">
+            {peakElev.toLocaleString()} m
+          </text>
+
+          {/* stop labels */}
+          {STOP_LABELS.map(l => {
+            const x = ex(l.idx), y = ey(elevations[l.idx]);
+            const anchor = l.idx < 4 ? 'start' : l.idx > NUM_SAMPLES - 5 ? 'end' : 'middle';
             return (
-              <g key={p.label!}>
-                <circle cx={p.x} cy={p.y} r={isPeak ? 5 : 4} fill={isPeak ? '#ef4444' : '#f97316'} stroke="white" strokeWidth="1.5" />
-                <text x={p.x} y={p.y - (isPeak ? 24 : 12)} textAnchor={anchor}
-                  fontSize={isPeak ? 11 : 10} fontWeight={isPeak ? '700' : '500'}
-                  fill={isPeak ? '#ef4444' : '#374151'} fontFamily="system-ui,sans-serif">
-                  {p.label}
+              <g key={l.name}>
+                <circle cx={x} cy={y} r="4" fill="#f97316" stroke="white" strokeWidth="1.5" />
+                <text x={x} y={y - 12} textAnchor={anchor} fontSize="10" fontWeight="500" fill="#374151" fontFamily="system-ui,sans-serif">
+                  {l.name}
                 </text>
-                {isPeak && (
-                  <text x={p.x} y={p.y - 12} textAnchor="middle" fontSize="10" fill="#ef4444" fontFamily="system-ui,sans-serif">
-                    2 926 m
-                  </text>
-                )}
               </g>
             );
           })}
-
-          {/* baseline label */}
-          <text x={PAD.l - 6} y={ey(0) + 4} textAnchor="end" fontSize="10" fill="#cbd5e1" fontFamily="system-ui,sans-serif">0</text>
         </svg>
       </div>
     </section>
