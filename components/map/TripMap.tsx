@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { GeoJSONSource, Marker, Map as MaplibreMap } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import type { Pin, PendingPin } from '@/lib/types';
+import AddPinModal from './AddPinModal';
 
 const MAPTILER_KEY = process.env.NEXT_PUBLIC_MAPTILER_KEY!;
 
@@ -181,7 +183,7 @@ export function ElevationProfile() {
 
 // ─── Map ──────────────────────────────────────────────────────────────────────
 
-export function TripMap() {
+export function TripMap({ boardCode }: { boardCode?: string } = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef       = useRef<MaplibreMap | null>(null);
   const markersRef   = useRef<Marker[]>([]);
@@ -189,12 +191,44 @@ export function TripMap() {
   const styleKeyRef  = useRef<keyof typeof STYLE_URLS>('terrain');
   const [styleKey, setStyleKey] = useState<keyof typeof STYLE_URLS>('terrain');
 
+  // wishlist state/refs
+  const [pendingPin, setPendingPin]      = useState<PendingPin | null>(null);
+  const [addMode, setAddMode]            = useState(false);
+  const addModeRef                       = useRef(false);
+  const pinsRef                          = useRef<Pin[]>([]);
+  const wishlistMarkersRef               = useRef<Marker[]>([]);
+  const addWishlistMarkersRef            = useRef<(() => void) | null>(null);
+
   const toggleStyle = () => {
     const next: keyof typeof STYLE_URLS = styleKeyRef.current === 'terrain' ? 'satellite' : 'terrain';
     styleKeyRef.current = next;
     setStyleKey(next);
     mapRef.current?.setStyle(STYLE_URLS[next]);
   };
+
+  // keep addModeRef current and sync cursor style
+  useEffect(() => {
+    addModeRef.current = addMode;
+    if (mapRef.current) {
+      mapRef.current.getCanvas().style.cursor = addMode ? 'crosshair' : '';
+    }
+  }, [addMode]);
+
+  // poll for wishlist pins every 3s
+  useEffect(() => {
+    if (!boardCode) return;
+    let cancelled = false;
+    const load = async () => {
+      const res = await fetch(`/api/boards/${boardCode}/pins`);
+      if (res.ok && !cancelled) {
+        pinsRef.current = await res.json();
+        addWishlistMarkersRef.current?.();
+      }
+    };
+    load();
+    const id = setInterval(load, 3000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [boardCode]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -215,6 +249,34 @@ export function TripMap() {
       mapRef.current = map;
       map.addControl(new mgl.NavigationControl(), 'top-right');
       map.addControl(new mgl.FullscreenControl(), 'top-right');
+
+      // click-to-add handler (reads addModeRef to avoid stale closure)
+      map.on('click', (e) => {
+        if (!addModeRef.current) return;
+        setPendingPin({ lng: e.lngLat.lng, lat: e.lngLat.lat });
+      });
+
+      // stable function for (re)drawing wishlist markers; called from addLayers + polling effect
+      addWishlistMarkersRef.current = () => {
+        wishlistMarkersRef.current.forEach(m => m.remove());
+        wishlistMarkersRef.current = [];
+        pinsRef.current.forEach(pin => {
+          const el = document.createElement('div');
+          Object.assign(el.style, {
+            width: '22px', height: '22px', borderRadius: '50%',
+            background: pin.color, border: '2.5px solid white',
+            boxShadow: '0 2px 8px rgba(0,0,0,.45)', cursor: 'pointer',
+          });
+          const popup = new mgl.Popup({ offset: 14, closeButton: false, maxWidth: '220px' })
+            .setHTML(`<div style="font-family:system-ui,sans-serif;padding:8px 12px">
+              <div style="font-size:14px;font-weight:700;color:#1e293b">${pin.label || '(no label)'}</div>
+              <div style="font-size:11px;color:#64748b;margin-top:2px">added by ${pin.author}</div>
+            </div>`);
+          const marker = new mgl.Marker({ element: el })
+            .setLngLat([pin.lng, pin.lat]).setPopup(popup).addTo(map);
+          wishlistMarkersRef.current.push(marker);
+        });
+      };
 
       const addLayers = () => {
         // cancel any running draw animation
@@ -296,6 +358,9 @@ export function TripMap() {
           const marker = new mgl.Marker({ element: el }).setLngLat(stop.coords).setPopup(popup).addTo(map);
           markersRef.current.push(marker);
         });
+
+        // redraw wishlist pins after style swap (reads pinsRef.current)
+        if (boardCode) addWishlistMarkersRef.current?.();
       };
 
       // style.load fires on initial load AND after setStyle() — handles both cases
@@ -321,12 +386,39 @@ export function TripMap() {
       </div>
       <div className="relative overflow-hidden rounded-xl border border-slate-200 shadow-md">
         <div ref={containerRef} className="h-[540px] w-full" />
-        <button
-          onClick={toggleStyle}
-          className="absolute bottom-3 left-3 z-10 rounded-lg border border-slate-200 bg-white/90 px-3 py-1.5 text-xs font-semibold text-slate-700 shadow backdrop-blur-sm transition-colors hover:bg-white"
-        >
-          {styleKey === 'terrain' ? 'Satellite view' : 'Terrain view'}
-        </button>
+        <div className="absolute bottom-3 left-3 z-10 flex gap-2">
+          <button
+            onClick={toggleStyle}
+            className="rounded-lg border border-slate-200 bg-white/90 px-3 py-1.5 text-xs font-semibold text-slate-700 shadow backdrop-blur-sm transition-colors hover:bg-white"
+          >
+            {styleKey === 'terrain' ? 'Satellite view' : 'Terrain view'}
+          </button>
+          {boardCode && (
+            <button
+              onClick={() => setAddMode(m => !m)}
+              className={`rounded-lg border px-3 py-1.5 text-xs font-semibold shadow backdrop-blur-sm transition-colors ${
+                addMode
+                  ? 'border-indigo-400 bg-indigo-600 text-white hover:bg-indigo-700'
+                  : 'border-slate-200 bg-white/90 text-slate-700 hover:bg-white'
+              }`}
+            >
+              {addMode ? '✕ Cancel' : '+ Add pin'}
+            </button>
+          )}
+        </div>
+        {boardCode && pendingPin && (
+          <AddPinModal
+            pendingPin={pendingPin}
+            boardCode={boardCode}
+            onSuccess={(pin) => {
+              pinsRef.current = [...pinsRef.current, pin];
+              addWishlistMarkersRef.current?.();
+              setPendingPin(null);
+              setAddMode(false);
+            }}
+            onClose={() => setPendingPin(null)}
+          />
+        )}
       </div>
     </section>
   );

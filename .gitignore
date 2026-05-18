@@ -21,5 +21,9 @@ yarn-error.log*
 .idea/
 .vscode/
 
+# TypeScript build info
+tsconfig.tsbuildinfo
+
 # Claude Code local config
 .claude/
+local.db

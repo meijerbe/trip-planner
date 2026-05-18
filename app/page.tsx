@@ -1,4 +1,5 @@
 import { TripMap, ElevationProfile } from '@/components/map/TripMap';
+import CreateBoardButton from '@/components/map/CreateBoardButton';
 
 const STATS = [
   { value: '7',        label: 'Days' },
@@ -32,6 +33,8 @@ export default function Home() {
           </div>
         ))}
       </div>
+
+      <CreateBoardButton />
 
       <TripMap />
 
