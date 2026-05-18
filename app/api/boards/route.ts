@@ -1,10 +1,14 @@
 import { NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
-import db from '@/lib/db';
+import { supabase } from '@/lib/db';
 
 export async function POST() {
-  const id = randomUUID();
-  const code = id.split('-')[0]; // 8 lowercase hex chars e.g. "a3b2c1d0"
-  db.prepare('INSERT INTO boards (id, code) VALUES (?, ?)').run(id, code);
-  return NextResponse.json({ code });
+  const code = randomUUID().split('-')[0];
+  const { data, error } = await supabase
+    .from('boards')
+    .insert({ code })
+    .select('code')
+    .single();
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  return NextResponse.json({ code: data.code });
 }
