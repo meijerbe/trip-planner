@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
-import { supabase } from '@/lib/db';
+import { getSupabase } from '@/lib/db';
 
 export async function POST() {
   const code = randomUUID().split('-')[0];
-  const { data, error } = await supabase
+  const { data, error } = await getSupabase()
     .from('boards')
     .insert({ code })
     .select('code')

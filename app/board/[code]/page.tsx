@@ -1,11 +1,11 @@
 import { notFound } from 'next/navigation';
-import { supabase } from '@/lib/db';
+import { getSupabase } from '@/lib/db';
 import { TripMap, ElevationProfile } from '@/components/map/TripMap';
 import BoardHeader from '@/components/map/BoardHeader';
 
 export default async function BoardPage({ params }: { params: Promise<{ code: string }> }) {
   const { code } = await params;
-  const { data: board } = await supabase
+  const { data: board } = await getSupabase()
     .from('boards').select('id').eq('code', code).single();
   if (!board) notFound();
   return (
