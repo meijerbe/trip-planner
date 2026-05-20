@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { GeoJSONSource, Marker, Map as MaplibreMap } from 'maplibre-gl';
+import type { FeatureCollection } from 'geojson';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Pin, PendingPin } from '@/lib/types';
 import AddPinModal from './AddPinModal';
@@ -34,6 +35,57 @@ const ROUTE_COORDS: [number, number][] = [
   [45.370, 41.590],
   [44.848, 41.700],
 ];
+
+// 24 distinct colors for book route overlays — none clashing with the orange proposed route
+const ROUTE_COLORS = [
+  '#3b82f6', '#8b5cf6', '#ec4899', '#14b8a6',
+  '#f59e0b', '#84cc16', '#06b6d4', '#f43f5e',
+  '#10b981', '#6366f1', '#a855f7', '#0ea5e9',
+  '#22d3ee', '#4ade80', '#e879f9', '#38bdf8',
+  '#34d399', '#a3e635', '#fb7185', '#c084fc',
+  '#60a5fa', '#f472b6', '#2dd4bf', '#fbbf24',
+];
+
+interface BookRoute {
+  id: string;
+  name: string;
+  geojson: FeatureCollection;
+  color: string;
+}
+
+// Adds (or restores after style swap) book route layers below the proposed orange route.
+function addBookRoutesToMap(
+  map: MaplibreMap,
+  routes: BookRoute[],
+  activeIds: Set<string>,
+) {
+  routes.forEach(route => {
+    const id = `book-${route.id}`;
+    if (!map.getSource(id)) {
+      map.addSource(id, { type: 'geojson', data: route.geojson });
+    }
+    if (!map.getLayer(id)) {
+      map.addLayer(
+        {
+          id,
+          type: 'line',
+          source: id,
+          layout: {
+            'line-join': 'round',
+            'line-cap': 'round',
+            'visibility': activeIds.has(route.id) ? 'visible' : 'none',
+          },
+          paint: {
+            'line-color': route.color,
+            'line-width': 2.5,
+            'line-opacity': 0.85,
+          },
+        },
+        'route-glow', // insert below the proposed route so orange stays on top
+      );
+    }
+  });
+}
 
 // ─── Elevation profile ────────────────────────────────────────────────────────
 
@@ -190,6 +242,7 @@ export function TripMap({ boardCode }: { boardCode?: string } = {}) {
   const rafRef       = useRef<number | null>(null);
   const styleKeyRef  = useRef<keyof typeof STYLE_URLS>('terrain');
   const [styleKey, setStyleKey] = useState<keyof typeof STYLE_URLS>('terrain');
+  const mapReadyRef  = useRef(false);
 
   // wishlist state/refs
   const [pendingPin, setPendingPin]      = useState<PendingPin | null>(null);
@@ -198,6 +251,16 @@ export function TripMap({ boardCode }: { boardCode?: string } = {}) {
   const pinsRef                          = useRef<Pin[]>([]);
   const wishlistMarkersRef               = useRef<Marker[]>([]);
   const addWishlistMarkersRef            = useRef<(() => void) | null>(null);
+
+  // book route state/refs
+  const [bookRoutes, setBookRoutes]         = useState<BookRoute[]>([]);
+  const [activeRouteIds, setActiveRouteIds] = useState<Set<string>>(new Set());
+  const [panelOpen, setPanelOpen]           = useState(false);
+  const bookRoutesRef                       = useRef<BookRoute[]>([]);
+  const activeRouteIdsRef                   = useRef<Set<string>>(new Set());
+
+  useEffect(() => { bookRoutesRef.current = bookRoutes; }, [bookRoutes]);
+  useEffect(() => { activeRouteIdsRef.current = activeRouteIds; }, [activeRouteIds]);
 
   const toggleStyle = () => {
     const next: keyof typeof STYLE_URLS = styleKeyRef.current === 'terrain' ? 'satellite' : 'terrain';
@@ -229,6 +292,67 @@ export function TripMap({ boardCode }: { boardCode?: string } = {}) {
     const id = setInterval(load, 3000);
     return () => { cancelled = true; clearInterval(id); };
   }, [boardCode]);
+
+  // load GPX files listed in the manifest
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch('/routes/manifest.json');
+        if (!res.ok || cancelled) return;
+        const manifest: Array<{ id: string; name: string; file: string }> = await res.json();
+        if (manifest.length === 0 || cancelled) return;
+
+        const { gpx } = await import('@tmcw/togeojson');
+        const results = await Promise.all(
+          manifest.map(async (entry, idx) => {
+            try {
+              const r = await fetch(`/routes/${entry.file}`);
+              if (!r.ok) return null;
+              const text = await r.text();
+              const parser = new DOMParser();
+              const dom = parser.parseFromString(text, 'text/xml');
+              return {
+                id: entry.id,
+                name: entry.name,
+                geojson: gpx(dom) as FeatureCollection,
+                color: ROUTE_COLORS[idx % ROUTE_COLORS.length],
+              } satisfies BookRoute;
+            } catch {
+              return null;
+            }
+          }),
+        );
+        if (cancelled) return;
+        const loaded = results.filter((r): r is BookRoute => r !== null);
+        bookRoutesRef.current = loaded;
+        setBookRoutes(loaded);
+        // if map is already initialised, add layers immediately
+        if (mapReadyRef.current && mapRef.current) {
+          addBookRoutesToMap(mapRef.current, loaded, activeRouteIdsRef.current);
+        }
+      } catch {
+        // no manifest yet — silently do nothing
+      }
+    };
+    load();
+    return () => { cancelled = true; };
+  }, []);
+
+  // toggle book route visibility when selection changes
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReadyRef.current) return;
+    bookRoutesRef.current.forEach(route => {
+      const layerId = `book-${route.id}`;
+      if (map.getLayer(layerId)) {
+        map.setLayoutProperty(
+          layerId, 'visibility',
+          activeRouteIds.has(route.id) ? 'visible' : 'none',
+        );
+      }
+    });
+  }, [activeRouteIds]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -279,6 +403,7 @@ export function TripMap({ boardCode }: { boardCode?: string } = {}) {
       };
 
       const addLayers = () => {
+        mapReadyRef.current = true;
         // cancel any running draw animation
         if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
         // drop old markers (DOM elements survive style swaps)
@@ -293,7 +418,7 @@ export function TripMap({ boardCode }: { boardCode?: string } = {}) {
         });
         map.setTerrain({ source: 'terrain', exaggeration: 1.6 });
 
-        // route source — starts at the first coordinate only
+        // proposed route source — starts at the first coordinate only
         map.addSource('route', {
           type: 'geojson',
           data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [ROUTE_COORDS[0], ROUTE_COORDS[0]] } },
@@ -304,6 +429,9 @@ export function TripMap({ boardCode }: { boardCode?: string } = {}) {
         map.addLayer({ id: 'route-line', type: 'line', source: 'route',
           layout: { 'line-join': 'round', 'line-cap': 'round' },
           paint: { 'line-color': '#f97316', 'line-width': 3.5, 'line-opacity': 1 } });
+
+        // book route overlays — inserted below the proposed route layers
+        addBookRoutesToMap(map, bookRoutesRef.current, activeRouteIdsRef.current);
 
         // animated draw
         let step = 0;
@@ -386,6 +514,70 @@ export function TripMap({ boardCode }: { boardCode?: string } = {}) {
       </div>
       <div className="relative overflow-hidden rounded-xl border border-slate-200 shadow-md">
         <div ref={containerRef} className="h-[540px] w-full" />
+
+        {/* Book Routes panel — top-left, collapsible */}
+        <div className="absolute top-3 left-3 z-10">
+          <div className="w-52 rounded-lg border border-slate-200 bg-white/90 shadow backdrop-blur-sm">
+            <button
+              onClick={() => setPanelOpen(o => !o)}
+              className="flex w-full items-center justify-between px-3 py-2 text-xs font-semibold text-slate-700 hover:text-slate-900"
+            >
+              <span>Book Routes</span>
+              <svg
+                className={`h-3 w-3 transition-transform ${panelOpen ? 'rotate-180' : ''}`}
+                viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2"
+                strokeLinecap="round" strokeLinejoin="round"
+              >
+                <path d="M2 4l4 4 4-4" />
+              </svg>
+            </button>
+            {panelOpen && (
+              <div className="max-h-60 overflow-y-auto border-t border-slate-100 px-3 pb-3 pt-2">
+                {bookRoutes.length === 0 ? (
+                  <p className="text-xs leading-relaxed text-slate-400">
+                    Add GPX files to{' '}
+                    <code className="rounded bg-slate-100 px-1 font-mono text-slate-500">
+                      public/routes/
+                    </code>{' '}
+                    and update{' '}
+                    <code className="rounded bg-slate-100 px-1 font-mono text-slate-500">
+                      manifest.json
+                    </code>{' '}
+                    to compare book routes here.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {bookRoutes.map(route => (
+                      <label key={route.id} className="flex cursor-pointer items-start gap-2">
+                        <span
+                          className="mt-0.5 h-3 w-3 flex-shrink-0 rounded-full"
+                          style={{ backgroundColor: route.color }}
+                        />
+                        <span className="flex-1 text-xs leading-tight text-slate-700">
+                          {route.name}
+                        </span>
+                        <input
+                          type="checkbox"
+                          className="mt-0.5 accent-indigo-500"
+                          checked={activeRouteIds.has(route.id)}
+                          onChange={e => {
+                            setActiveRouteIds(prev => {
+                              const next = new Set(prev);
+                              if (e.target.checked) next.add(route.id);
+                              else next.delete(route.id);
+                              return next;
+                            });
+                          }}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
         <div className="absolute bottom-3 left-3 z-10 flex gap-2">
           <button
             onClick={toggleStyle}

@@ -8,6 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
+    "@tmcw/togeojson": "^7.1.2",
     "@vercel/analytics": "^2.0.1",
     "@vercel/speed-insights": "^2.0.0",
     "better-sqlite3": "^12.10.0",
